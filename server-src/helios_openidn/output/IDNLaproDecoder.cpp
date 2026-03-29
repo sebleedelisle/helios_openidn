@@ -2,7 +2,11 @@
 
 // Standard libraries
 #include <stdio.h>
+#if defined(__APPLE__)
+#include <stdlib.h>
+#else
 #include <malloc.h>
+#endif
 
 // Project headers
 #include "../shared/ISPDB25Point.h"

@@ -13,7 +13,11 @@
 
 // Standard libraries
 #include <stdint.h>
+#if defined(__APPLE__)
+#include <stdlib.h>
+#else
 #include <malloc.h>
+#endif
 
 
 

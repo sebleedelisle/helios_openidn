@@ -9,6 +9,7 @@
 #if __cplusplus >= 201103L
 #include <atomic>
 #endif
+#include <cstdio>
 
 // Module header
 #include "AdapterBase.hpp"

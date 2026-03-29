@@ -35,7 +35,11 @@
 
 // Standard libraries
 #include <string.h>
+#if defined(__APPLE__)
+#include <stdlib.h>
+#else
 #include <malloc.h>
+#endif
 
 // Project headers
 #include "idn-stream.h"
@@ -253,4 +257,3 @@ bool IDNService::handlesMode(uint8_t serviceMode)
 void IDNService::housekeeping(ODF_ENV *env, bool shutdownFlag)
 {
 }
-

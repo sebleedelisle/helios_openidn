@@ -50,7 +50,12 @@
 
 // Module header
 #include "SockIDNServer.hpp"
+#if !defined(OPENIDN_BRIDGE_MODE)
+#define OPENIDN_BRIDGE_MODE 0
+#endif
+#if defined(__linux__)
 #include <fstream>
+#endif
 
 
 
@@ -63,6 +68,7 @@ typedef struct
     RECV_COOKIE cookie;                                 // Must be first element!
 
     struct sockaddr_storage remoteAddr;
+    socklen_t remoteAddrSize;
 
     int fdSocket;
     uint8_t *sendBufferPtr;
@@ -175,8 +181,6 @@ static int sockaddr_cmp(struct sockaddr *a, struct sockaddr *b)
     return 0;
 }
 
-
-
 // =================================================================================================
 //  Struct RECV_COOKIE
 //
@@ -199,7 +203,12 @@ void RECV_COOKIE::sendResponse(unsigned sendLen)
     SOCK_RECV_CONTEXT *rxContext = (SOCK_RECV_CONTEXT *)this;
 
     struct sockaddr *sendAddrPtr = (struct sockaddr *)&rxContext->remoteAddr;
+#if OPENIDN_BRIDGE_MODE
+    socklen_t sendAddrSize = rxContext->remoteAddrSize;
+    if(sendAddrSize == 0) sendAddrSize = sizeof(rxContext->remoteAddr);
+#else
     socklen_t sendAddrSize = sizeof(rxContext->remoteAddr);
+#endif
     sendto(rxContext->fdSocket, (char *)rxContext->sendBufferPtr, sendLen, 0, sendAddrPtr, sendAddrSize);
 }
 
@@ -375,6 +384,50 @@ int SockIDNServer::receiveUDP(ODF_ENV *env, int fdSocket, uint32_t usRecvTime)
         rxContext.sendBufferPtr = sendBuffer;
         rxContext.sendBufferSize = sizeof(sendBuffer);
 
+#if OPENIDN_BRIDGE_MODE
+        // Read the datagram from the socket first. On some platforms, FIONREAD can
+        // race with actual receive length and report stale lengths.
+        uint8_t recvBuffer[0x10000];
+        socklen_t remoteAddrLen = sizeof(rxContext.remoteAddr);
+        struct sockaddr *remoteAddrPtr = (struct sockaddr *)&(rxContext.remoteAddr);
+        int recvLen = recvfrom(fdSocket, (char *)recvBuffer, sizeof(recvBuffer), 0, remoteAddrPtr, &remoteAddrLen);
+        rxContext.remoteAddrSize = remoteAddrLen;
+
+        // No packet processing in case of errors
+        if (recvLen < 0)
+        {
+            if ((errno == EWOULDBLOCK) || (errno == EAGAIN))
+            {
+                result = 0;
+                break;
+            }
+            tpr.logError("recv: recvfrom() failed, errno=%d", errno);
+            break;
+        }
+
+        // No payload: ignore
+        if ((recvLen <= 0) || (recvLen > 0xFFFF))
+        {
+            result = 0;
+            break;
+        }
+
+        // Create a taxi buffer matching the actual payload size.
+        TaxiSource *taxiSource = &static_cast<ODFEnvironment *>(env)->taxiSource;
+        taxiBuffer = taxiSource->allocTaxiBuffer((uint16_t)recvLen);
+        if (taxiBuffer == (ODF_TAXI_BUFFER *)0)
+        {
+            tpr.logError("recv: Out of memory");
+            break;
+        }
+
+        // Populate taxi buffer and copy payload.
+        taxiBuffer->taxiSource = taxiSource;
+        taxiBuffer->payloadLen = (uint16_t)recvLen;
+        taxiBuffer->payloadPtr = (void *)&taxiBuffer[1];
+        taxiBuffer->sourceRefTime = usRecvTime;
+        memcpy(taxiBuffer->payloadPtr, recvBuffer, (size_t)recvLen);
+#else
         // Get number of octets ready in the input buffer
         int payloadLen;
         if (ioctl(fdSocket, FIONREAD, (char *)&payloadLen, sizeof(payloadLen)) < 0)
@@ -395,7 +448,7 @@ int SockIDNServer::receiveUDP(ODF_ENV *env, int fdSocket, uint32_t usRecvTime)
 
         // Create a taxi buffer
         TaxiSource *taxiSource = &static_cast<ODFEnvironment *>(env)->taxiSource;
-        ODF_TAXI_BUFFER *taxiBuffer = taxiSource->allocTaxiBuffer(payloadLen);
+        taxiBuffer = taxiSource->allocTaxiBuffer(payloadLen);
         if (taxiBuffer == (ODF_TAXI_BUFFER *)0)
         {
             tpr.logError("recv: Out of memory");
@@ -426,6 +479,7 @@ int SockIDNServer::receiveUDP(ODF_ENV *env, int fdSocket, uint32_t usRecvTime)
             tpr.logError("recv: buffer length / receive length mismatch, %u != %u", payloadLen, recvLen);
             break;
         }
+#endif
 
         // Build readable client name (for diagnostics)
         int rcNameInfo = getnameinfo(remoteAddrPtr, remoteAddrLen,
@@ -460,8 +514,6 @@ int SockIDNServer::receiveUDP(ODF_ENV *env, int fdSocket, uint32_t usRecvTime)
             tpr.logWarn("%s|prep: Unsupported address family", cookie->diagString);
             break;
         }
-
-        // -----------------------------------------------------------------------------------------
 
         // Process the received packet. Note: Buffer has been passed or discarded!
         processCommand(env, cookie, taxiBuffer);
@@ -607,7 +659,8 @@ void SockIDNServer::networkThreadFunc()
         exit(1);
     }
 
-
+#if defined(__linux__)
+    uint8_t unitID[UNITID_SIZE] = { 0 };
     struct ifconf ifc;
     char buf[1024];
 
@@ -636,12 +689,10 @@ void SockIDNServer::networkThreadFunc()
 
             //get IP
             ioctl(fdSocket, SIOCGIFADDR, &ifr);
-            uint32_t ip = ntohl(((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr.s_addr);
             printf("inet %s ", inet_ntoa( ((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr ));
 
             //get netmask
             ioctl(fdSocket, SIOCGIFNETMASK, &ifr);
-            uint32_t netmask = ntohl(((struct sockaddr_in *)&ifr.ifr_netmask)->sin_addr.s_addr);
             printf("netmask %s\n", inet_ntoa( ((struct sockaddr_in *)&ifr.ifr_netmask)->sin_addr ));
 
             if ( not_loopback ) // don't count loopback
@@ -698,8 +749,6 @@ void SockIDNServer::networkThreadFunc()
     printf("%02x ", mac_address[5]);
     printf("\n\n");
 
-
-    uint8_t unitID[UNITID_SIZE] = { 0 };
     unitID[0] = 7;
     unitID[1] = 1;
     unitID[2] = mac_address[0];
@@ -708,12 +757,41 @@ void SockIDNServer::networkThreadFunc()
     unitID[5] = mac_address[3];
     unitID[6] = mac_address[4];
     unitID[7] = mac_address[5];
-    setUnitID(unitID, sizeof(unitID));
-
     //uint8_t hostName[HOST_NAME_SIZE] = { 0 };
     //gethostname((char *)hostName, sizeof(hostName));
     //setHostName(hostName, sizeof(hostName));
+    setUnitID(unitID, sizeof(unitID));
+#elif OPENIDN_BRIDGE_MODE
+    uint8_t unitID[UNITID_SIZE] = { 0 };
+    uint8_t hostName[HOST_NAME_SIZE] = { 0 };
+    if(gethostname(reinterpret_cast<char *>(hostName), sizeof(hostName) - 1) != 0)
+    {
+        snprintf(reinterpret_cast<char *>(hostName), sizeof(hostName), "idn-bridge");
+    }
 
+    // Non-Linux fallback: deterministic per-host UnitID.
+    uint64_t signature = 1469598103934665603ULL; // FNV-1a offset basis
+    for (unsigned i = 0; i < sizeof(hostName) && hostName[i] != 0; ++i)
+    {
+        signature ^= static_cast<uint64_t>(hostName[i]);
+        signature *= 1099511628211ULL;
+    }
+
+    unitID[0] = 7;
+    unitID[1] = 1;
+    unitID[2] = static_cast<uint8_t>((signature >> 40) & 0xFF);
+    unitID[3] = static_cast<uint8_t>((signature >> 32) & 0xFF);
+    unitID[4] = static_cast<uint8_t>((signature >> 24) & 0xFF);
+    unitID[5] = static_cast<uint8_t>((signature >> 16) & 0xFF);
+    unitID[6] = static_cast<uint8_t>((signature >> 8) & 0xFF);
+    unitID[7] = static_cast<uint8_t>(signature & 0xFF);
+
+    // UnitID must represent a unicast identifier (clear multicast bit).
+    unitID[2] &= 0xFE;
+
+    setHostName(hostName, sizeof(hostName));
+    setUnitID(unitID, sizeof(unitID));
+#endif
     // ---------------------------------------------------------------------------------------------
 
     // Run main loop
@@ -731,4 +809,3 @@ void SockIDNServer::networkThreadFunc()
     // Print status
     printf("IDN server terminated. Taxi count = %u\n", odfEnv.taxiSource.taxiCount.load());
 }
-

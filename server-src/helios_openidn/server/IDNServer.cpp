@@ -39,10 +39,15 @@
 #include "idn-stream.h"
 #include "../shared/ODFTools.hpp"
 #include "PEVFlags.h"
+#if !defined(OPENIDN_BRIDGE_MODE)
+#define OPENIDN_BRIDGE_MODE 0
+#endif
+#if !OPENIDN_BRIDGE_MODE
+#include "../hardware/Helios/HeliosAdapter.hpp"
+#endif
 
 // Module header
 #include "IDNServer.hpp"
-#include "../hardware/Helios/HeliosAdapter.hpp"
 
 
 
@@ -1154,7 +1159,9 @@ void IDNServer::processCommand(ODF_ENV *env, RECV_COOKIE *cookie, ODF_TAXI_BUFFE
             IDNHDR_SERVICEMAP_ENTRY relayTable[0xFF];
             IDNHDR_SERVICEMAP_ENTRY serviceTable[0xFF];
 
+#if !OPENIDN_BRIDGE_MODE
             HeliosAdapter::updateDeviceList();
+#endif
 
             for(LLNode<ServiceNode> *node = firstService; node != (LLNode<ServiceNode> *)0; node = node->getNextNode())
             {
@@ -1529,4 +1536,3 @@ void IDNServer::housekeeping(ODF_ENV *env, uint32_t envTimeUS)
         }
     }
 }
-
